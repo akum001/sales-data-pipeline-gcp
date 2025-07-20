@@ -1,4 +1,4 @@
-# 📊 GCP Sales Data Streaming & Batch Pipeline
+# 📊 Event driven Near Real-Time Sales Data Pipeline on GCP
 
 This project implements an **end-to-end GCP data pipeline** that simulates, ingests, cleans, and stores sales data into BigQuery using Cloud Functions, Pub/Sub, Cloud Storage, Dataproc, and Spark. You can use this project to demonstrate your cloud data engineering skills using real-time and batch data processing.
 
