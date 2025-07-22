@@ -1,20 +1,32 @@
-# 📊 Event driven Near Real-Time Sales Data Pipeline on GCP
+# 📊 Event-Driven Near Real-Time Sales Data Pipeline on GCP
 
-This project implements an **end-to-end GCP data pipeline** that simulates, ingests, cleans, and stores sales data into BigQuery using Cloud Functions, Pub/Sub, Cloud Storage, Dataproc, and Spark. You can use this project to demonstrate your cloud data engineering skills using real-time and batch data processing.
+This project implements a **scalable, event-driven ETL pipeline on Google Cloud Platform (GCP)** that:
+
+* Simulates and uploads raw sales data
+* Triggers a Cloud Function using Eventarc on GCS upload
+* Runs a Spark job on Dataproc
+* Loads processed data into **BigQuery**
+
+Technologies used: **Cloud Storage**, **Pub/Sub**, **Eventarc**, **Cloud Functions**, **Dataproc**, **Spark**, **BigQuery**
 
 ---
 
-## 🔧 Project Setup (One-Time)
+## 🔧 1. Project Setup (One-Time)
 
-### 1. **Create GCP Project & Link Billing**
+### 1.1 Create a GCP Project and Link Billing
+
 ```bash
 gcloud projects create spark-bq-pipeline-sales-101 --name="SparkBQPipeline"
-gcloud config set project spark-bq-pipeline-sales-101
-gcloud beta billing projects link spark-bq-pipeline-sales-101 --billing-account=YOUR_BILLING_ACCOUNT_ID
 gcloud auth application-default set-quota-project spark-bq-pipeline-sales-101
+gcloud config set project spark-bq-pipeline-sales-101
+gcloud beta billing accounts list
+gcloud beta billing projects link spark-bq-pipeline-sales-101 --billing-account=YOUR_BILLING_ACCOUNT_ID
 ```
 
-### 2. **Enable Required APIs**
+---
+
+## ☁️ 2. Enable Required GCP APIs
+
 ```bash
 gcloud services enable \
   compute.googleapis.com \
@@ -23,19 +35,21 @@ gcloud services enable \
   bigquery.googleapis.com \
   cloudfunctions.googleapis.com \
   eventarc.googleapis.com \
-  eventarc-publishing.googleapis.com \
-  eventarcpublishing.googleapis.com \
   run.googleapis.com \
   cloudbuild.googleapis.com
 ```
 
-### 3. **Create Buckets**
+---
+
+## 🪣 3. Create Cloud Storage Buckets
+
 ```bash
 gsutil mb -c STANDARD -l us-central1 gs://sales-data-bucket-sales-101
 gsutil mb -c STANDARD -l us-central1 gs://spark-temp-bucket-sales-101
 ```
 
-Structure:
+No need to manually create folders. GCS uses **object prefixes**, and your PySpark script will write to:
+
 ```
 gs://sales-data-bucket-sales-101/raw/
 gs://sales-data-bucket-sales-101/scripts/
@@ -43,137 +57,175 @@ gs://sales-data-bucket-sales-101/scripts/
 
 ---
 
-## 🧱 IAM Setup (Required for Function + Eventarc)
+## 🔐 4. IAM Setup for Dataproc & Eventarc
 
-### 4. **Create service account and give access to all services**
+### 4.1 Create and Configure Service Account
+
 ```bash
 PROJECT_ID="spark-bq-pipeline-sales-101"
 SA_NAME="dataproc-spark-sa"
 
 gcloud iam service-accounts create $SA_NAME --display-name "Dataproc Spark SA"
+```
 
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/storage.admin"
+### 4.2 Grant Required Roles
 
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/bigquery.dataEditor"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/dataproc.editor"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/dataproc.worker"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/bigquery.jobUser"
-
-gcloud storage buckets add-iam-policy-binding gs://spark-temp-bucket-sales-101 \
-  --member=serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com \                              --role=roles/storage.objectAdmin
-
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/eventarc.eventReceiver"
-
-PROJECT_NUMBER=$(gcloud projects describe spark-bq-pipeline-sales-101 --format="value(projectNumber)")
-
-gsutil iam ch serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com:roles/storage.objectViewer gs://sales-data-bucket-sales-101
-
-gsutil iam ch serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com:roles/storage.objectViewer gs://sales-data-bucket-sales-101
+```bash
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/storage.admin"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:service-271445855234@gcp-sa-eventarc.iam.gserviceaccount.com" \
-  --role="roles/eventarc.serviceAgent"
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/bigquery.dataEditor"
 
-# Give permission to access Pub/Sub
-gcloud projects add-iam-policy-binding spark-bq-pipeline-sales-101 \
-  --member="serviceAccount:service-271445855234@gs-project-accounts.iam.gserviceaccount.com" \
-  --role="roles/pubsub.publisher"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/dataproc.editor"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/dataproc.worker"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/bigquery.jobUser"
+
+gcloud storage buckets add-iam-policy-binding gs://spark-temp-bucket-sales-101 \
+  --member=serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com \
+  --role=roles/storage.objectAdmin
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/eventarc.eventReceiver"
 ```
+
 ---
 
-## 🗃️ BigQuery Setup
+## 🗃️ 5. BigQuery Setup
 
-### 6. **Create Dataset and Table**
+### 5.1 Create Dataset and Table
+
 ```bash
 bq mk --dataset --location=us sparkbqpipelinev1:sales_dataset
 ```
+
 ```bash
-bq mk --table sales_dataset.sales_data product:STRING,price:FLOAT64,quantity:INT64,total:FLOAT64,ordered_at:TIMESTAMP,delivery_at:TIMESTAMP,processed_at:TIMESTAMP
+bq mk --table sales_dataset.sales_data \
+product:STRING,price:FLOAT64,quantity:INT64,total:FLOAT64,ordered_at:TIMESTAMP,delivery_at:TIMESTAMP,processed_at:TIMESTAMP
 ```
 
-## 🚀 Dataproc Cluster Setup
+---
 
-### 7. **Create Dataproc Cluster**
+## 🚀 6. Dataproc Cluster Setup
+
 ```bash
 gcloud dataproc clusters create dataproc-sales-cluster \
-    --region=us-central1 \  
-    --zone=us-central1-a \ 
-    --single-node \ 
-    --master-boot-disk-size=50GB \  
-    --image-version=2.1-debian11 \   
-    --enable-component-gateway \  
-    --service-account=$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com
-```
-
----
-## 🧪 Deploy Cloud Function (Trigger on GCS Upload)
-
-### 8. **Prepare Environment Variables**
-
-| Key              | Value                                                           |
-|------------------|-----------------------------------------------------------------|
-| PROJECT_ID       | spark-bq-pipeline-sales-101                                     |
-| REGION           | us-central1                                                     |
-| SCRIPT_PATH      | gs://sales-data-bucket-sales-101/scripts/process_sales.py       |
-| CLUSTER_NAME     | dataproc-sales-cluster                                          |
-| RAW_PREFIX       | raw/                                                            |
-
-### 9. **Zip main.py and requirements.txt together**
-```bash
-cd scripts/
-zip function.zip main.py requirements.txt
-```
-### 9. **Deploy Cloud Function**
-```bash
-gcloud functions deploy trigger_dataproc_on_upload \
-    --runtime python311 \
-    --trigger-resource sales-data-bucket-sales-101 \
-    --trigger-event google.storage.object.finalize \
-    --entry-point gcs_trigger \
-    --source . \
-    --region us-central1 \
-    --memory 512MB \
-    --timeout 120s \
-    --set-env-vars \
-    PROJECT_ID=spark-bq-pipeline-sales-101,REGION=us-central1,SCRIPT_PATH=gs://sales-data-bucket-sales-101/scripts/process_sales.py,CLUSTER_NAME=dataproc-sales-cluster,TEMP_GCS_BUCKET=spark-temp-bucket-sales-101,BQ_DATASET=sales_dataset,BQ_TABLE=sales_data
+  --region=us-central1 \
+  --zone=us-central1-a \
+  --single-node \
+  --master-boot-disk-size=50GB \
+  --image-version=2.1-debian11 \
+  --enable-component-gateway \
+  --service-account=$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com
 ```
 
 ---
 
-## 🧠 Upload PySpark Script to GCS
+## 🧠 7. Upload PySpark Script to GCS
+
 ```bash
 gsutil cp scripts/process_sales.py gs://sales-data-bucket-sales-101/scripts/
 ```
 
 ---
-## 🧪 Testing the Pipeline
 
-### 10. **Simulate CSV Upload**
+## ⚙️ 8. Deploy Cloud Function (Triggered by GCS Upload)
+
+### 8.1 Prepare Environment Variables
+
+| Key               | Value                                                       |
+| ----------------- | ----------------------------------------------------------- |
+| PROJECT\_ID       | spark-bq-pipeline-sales-101                                 |
+| REGION            | us-central1                                                 |
+| SCRIPT\_PATH      | gs\://sales-data-bucket-sales-101/scripts/process\_sales.py |
+| CLUSTER\_NAME     | dataproc-sales-cluster                                      |
+| TEMP\_GCS\_BUCKET | spark-temp-bucket-sales-101                                 |
+| BQ\_DATASET       | sales\_dataset                                              |
+| BQ\_TABLE         | sales\_data                                                 |
+
+### 8.2 Zip the Function Files
+
 ```bash
-python3 sales_data_simulator.py  --gcs_bucket=sales-data-bucket-sales-101
+cd scripts/
+zip function.zip main.py requirements.txt
 ```
-This script:
-- Generates sales CSV data in `../data`
-- Uploads to `gs://sales-data-bucket-sales-101/raw/`
 
-Once uploaded:
-- Cloud Function triggers
-- Dataproc job runs `process_sales.py`
-- Spark job loads data to BigQuery
+### 8.3 Deploy Cloud Function
+
+```bash
+gcloud functions deploy trigger_dataproc_on_upload \
+  --runtime python311 \
+  --trigger-resource sales-data-bucket-sales-101 \
+  --trigger-event google.storage.object.finalize \
+  --entry-point gcs_trigger \
+  --source . \
+  --region us-central1 \
+  --memory 512MB \
+  --timeout 120s \
+  --set-env-vars \
+  PROJECT_ID=spark-bq-pipeline-sales-101,REGION=us-central1,SCRIPT_PATH=gs://sales-data-bucket-sales-101/scripts/process_sales.py,CLUSTER_NAME=dataproc-sales-cluster,TEMP_GCS_BUCKET=spark-temp-bucket-sales-101,BQ_DATASET=sales_dataset,BQ_TABLE=sales_data
+```
 
 ---
 
-## 📂 Repository Structure
+## ⚠️ 9. Troubleshooting Eventarc IAM Error
+
+When deploying the Cloud Function for the first time, you may see:
+
+```
+ERROR: (gcloud.functions.deploy) OperationError: Creating trigger failed...
+```
+
+This happens because **GCP hasn’t created required service accounts yet** (like `gs-project-accounts`).
+
+### ✅ Solution
+
+```bash
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+```
+
+Then retry the function deployment.
+
+---
+
+## 🧪 10. Simulate Data Upload
+
+```bash
+python3 sales_data_simulator.py --gcs_bucket=sales-data-bucket-sales-101
+```
+
+This will:
+
+* Generate sales data CSV locally every 10 mins (by default)
+* Upload to `gs://sales-data-bucket-sales-101/raw/`
+* Trigger Cloud Function → Dataproc job → Spark → BigQuery
+
+---
+
+## 📁 11. Project Structure
 
 ```
 sales-data-pipeline-gcp/
 │
 ├── scripts/
 │   ├── process_sales.py         ← PySpark job
-│   └── gcs_trigger.py           ← Cloud Function handler
+│   └── main.py                  ← Cloud Function handler
 │
-├── sales_data_simulator.py     ← Local simulator for generating/uploading sales data
+├── sales_data_simulator.py     ← Sales data simulator
 ```
+
+---

@@ -1,6 +1,7 @@
 import argparse
 import csv
 import random
+import time
 
 from datetime import datetime, timedelta
 from google.cloud import storage
@@ -95,6 +96,18 @@ def save_and_upload_to_gcs(bucket_name, destination_folder='raw', num_records=10
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--gcs_bucket', required=True, help="GCS bucket name to use")
-    parser.add_argument('--num_records', default=100, help="Number of records to be generated")
+    parser.add_argument('--num_records', type=int, default=100, help="Number of records to be generated each time")
+    parser.add_argument('--interval_min', type=int, default=10, help="Interval in minutes between uploads")
+
     args = parser.parse_args()
-    save_and_upload_to_gcs(bucket_name=args.gcs_bucket, num_records=args.num_records)
+
+    print(f"Starting uploader to bucket: {args.gcs_bucket}, every {args.interval_min} minutes...")
+
+    try:
+        while True:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Generating and uploading data...")
+            save_and_upload_to_gcs(bucket_name=args.gcs_bucket, num_records=args.num_records)
+            print("Upload complete. Sleeping...\n")
+            time.sleep(args.interval_min * 60)
+    except KeyboardInterrupt:
+        print("Stopped by user.")
